@@ -1,0 +1,138 @@
+# ==========================================
+# 0. 敏感环境与配置信息 (CRITICAL)
+# ==========================================
+.env
+.env.local
+.env.*.local
+.env.production
+.env.staging
+*.pem
+*.key
+*.cert
+docker-compose.override.yml
+
+# ==========================================
+# 1. 媒体与业务上传文件 (音视频、简历、录音等)
+# ==========================================
+uploads/
+recordings/
+resumes_storage/
+temp_audio/
+*.mp3
+*.wav
+*.pcm
+*.ogg
+*.m4a
+*.webm
+
+# ==========================================
+# 2. Docker & 数据库本地持久化挂载
+# ==========================================
+pgdata/
+redisdata/
+minio_data/
+*.sql.gz
+*.dump
+
+# ==========================================
+# 3. Python / FastAPI 后端
+# ==========================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# 虚拟环境 (Virtual Environments)
+venv/
+.venv/
+ENV/
+env/
+env.bak/
+venv.bak/
+
+# 单元测试与代码质量工具
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# ==========================================
+# 4. 本地 AI / 模型 / 向量库临时缓存
+# ==========================================
+models/
+checkpoints/
+huggingface/
+.cache/
+vector_store_data/
+milvus_data/
+
+# ==========================================
+# 5. 前端 (Next.js / React / Node)
+# ==========================================
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Next.js 构建产物
+.next/
+out/
+
+# 构建打包输出
+dist/
+build/
+
+# Turbo 缓存 (如果使用 Turbopack / Turborepo)
+.turbo
+
+# ==========================================
+# 6. 系统与 IDE 编辑器配置文件
+# ==========================================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# VS Code
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+*.code-workspace
+
+# JetBrains (PyCharm, WebStorm 等)
+.idea/
+
+# ==========================================
+# 7. 日志文件
+# ==========================================
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
