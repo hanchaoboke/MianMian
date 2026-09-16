@@ -1,0 +1,6 @@
+<template><div class="auth-page"><div class="auth-card"><div class="brand"><span class="brand-mark">M</span><div><strong>MianMian</strong><small>面面俱道 · 教师管理端</small></div></div><h2>教师登录</h2><p class="muted">管理员分配教师账号；管理员也从此入口登录</p><p v-if="error" class="error">{{ error }}</p><input v-model="username" placeholder="管理员 / 教师用户名"><input v-model="password" type="password" placeholder="密码"><button class="primary" :disabled="busy" @click="login">{{busy?'登录中…':'进入教师管理端'}}</button></div></div></template>
+<script setup>
+import {ref} from 'vue';import {useRouter} from 'vue-router';import {request} from '../api'
+const router=useRouter(),username=ref(''),password=ref(''),busy=ref(false),error=ref('')
+async function login(){busy.value=true;error.value='';try{const u=await request('/api/v1/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:username.value,password:password.value})});if(!['ADMIN','TEACHER'].includes(u.role))throw new Error('该账号不是教师账号');localStorage.setItem('mianmian-token',u.access_token);localStorage.setItem('mianmian-user',JSON.stringify(u));router.push('/teacher')}catch(e){error.value=e.message}finally{busy.value=false}}
+</script>

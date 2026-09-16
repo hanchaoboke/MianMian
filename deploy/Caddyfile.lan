@@ -1,0 +1,41 @@
+{
+	admin 127.0.0.1:2020
+	auto_https disable_redirects
+	skip_install_trust
+}
+
+{$MIANMIAN_HTTPS_SITES} {
+	tls internal
+	encode zstd gzip
+	header {
+		Permissions-Policy "microphone=(self), camera=()"
+		X-Content-Type-Options nosniff
+		Referrer-Policy same-origin
+	}
+
+	@backend path /api/* /ws/*
+	handle @backend {
+		request_body {
+			max_size 26MB
+		}
+		reverse_proxy 127.0.0.1:8010 {
+			flush_interval -1
+			transport http {
+				response_header_timeout 360s
+			}
+		}
+	}
+
+	handle /mianmian-local-ca.crt {
+		root * "{$MIANMIAN_CERT_EXPORT_DIR}"
+		header Content-Disposition "attachment; filename=mianmian-local-ca.crt"
+		file_server
+	}
+
+	handle {
+		root * "{$MIANMIAN_FRONTEND_DIR}"
+		header Cache-Control no-cache
+		try_files {path} /index.html
+		file_server
+	}
+}

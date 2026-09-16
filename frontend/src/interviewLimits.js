@@ -1,0 +1,4 @@
+export const MAX_RECORDING_MS = 10 * 60 * 1000
+export const MAX_AUDIO_BYTES = 25 * 1024 * 1024
+export const MAX_ANSWER_CHARACTERS = 6000
+export const RECORDING_AUDIO_BITRATE = 64000

@@ -1,0 +1,22 @@
+{
+  "name": "mianmian-interview-ui",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build"
+  },
+  "dependencies": {
+    "@vitejs/plugin-vue": "latest",
+    "lucide-vue-next": "latest",
+    "vite": "latest",
+    "vue": "latest",
+    "vue-router": "latest"
+  },
+  "devDependencies": {
+    "@vue/test-utils": "^2.5.0",
+    "happy-dom": "^20.14.5",
+    "vitest": "^5.0.0"
+  }
+}
