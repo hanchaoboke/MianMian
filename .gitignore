@@ -1,7 +1,7 @@
 # ==========================================
 # 0. 敏感环境与配置信息 (CRITICAL)
 # ==========================================
-.env
+backend/.env
 .env.local
 .env.*.local
 .env.production
@@ -9,6 +9,7 @@
 *.pem
 *.key
 *.cert
+.local/
 docker-compose.override.yml
 
 # ==========================================
