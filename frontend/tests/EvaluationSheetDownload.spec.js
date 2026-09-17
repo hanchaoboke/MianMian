@@ -19,7 +19,7 @@ it('automatically prepares and downloads the authenticated cached PDF on click',
   wrapper=mount(EvaluationSheetDownload,{props:{sessionId:'session'}});await flushPromises()
   expect(request).toHaveBeenCalledWith('/api/v1/interviews/session/evaluation-sheet',expect.objectContaining({method:'POST'}))
   expect(requestBlob).not.toHaveBeenCalled()
-  expect(wrapper.text()).toContain('仅第一页')
+  expect(wrapper.text()).toContain('单页 A4')
   await wrapper.get('button').trigger('click');await flushPromises()
   expect(requestBlob).toHaveBeenCalledWith('/api/v1/interviews/session/evaluation-sheet.pdf',expect.any(Object))
   expect(HTMLAnchorElement.prototype.click).toHaveBeenCalledTimes(1)
@@ -64,4 +64,14 @@ it('discards old report responses and aborts outstanding requests on unmount',as
   expect(oldSignal.aborted).toBe(true);expect(wrapper.text()).toContain('下载评价表 PDF')
   const newSignal=request.mock.calls[1][1].signal
   wrapper.unmount();wrapper=null;expect(newSignal.aborted).toBe(true)
+})
+it('offers regeneration when a teacher changed the template after the report was opened',async()=>{
+  request.mockResolvedValue({status:'ready'})
+  requestBlob.mockRejectedValue(new Error('评价表尚未生成或教师已更新模板，请刷新诊断页重新生成'))
+  wrapper=mount(EvaluationSheetDownload,{props:{sessionId:'session'}});await flushPromises()
+  await wrapper.get('button').trigger('click');await flushPromises()
+  expect(wrapper.get('button').text()).toBe('重新生成评价表')
+  await wrapper.get('button').trigger('click');await flushPromises()
+  expect(request).toHaveBeenCalledTimes(2)
+  expect(wrapper.get('button').text()).toBe('下载评价表 PDF')
 })

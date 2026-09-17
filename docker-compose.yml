@@ -4,6 +4,8 @@ services:
     env_file: ./backend/.env
     environment:
       ENVIRONMENT: production
+      DATA_DIR: /app/backend/uploads
+      STORAGE_CONFIG_FILE: /app/backend/uploads/.storage-settings.json
       DATABASE_URL: postgresql+asyncpg://postgres:${POSTGRES_PASSWORD:-change-me}@postgres:5432/ai_interview_platform
     ports: ["8010:8010"]
     depends_on:

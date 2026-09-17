@@ -11,17 +11,18 @@
     <main class="room-main">
       <div v-if="loading" class="room-loading" role="status"><LoaderCircle class="spin" :size="24" />正在进入面试室…</div>
       <template v-else>
-        <div class="room-heading"><div><p class="room-eyebrow">INTERVIEW ROOM</p><h1>{{ state.job_track || '技术面试' }}</h1></div><span>{{ styleLabel }}</span></div>
+        <div class="room-heading"><div><p class="room-eyebrow">INTERVIEW ROOM</p><h1>{{ state.job_track || '技术面试' }}</h1></div><span>{{ state.interview_mode === 'BUSINESS_SCENARIO' ? '企业业务 · ' : '' }}{{ styleLabel }}</span></div>
         <div class="room-progress"><span>已完成 {{ state.turn || 0 }} / {{ state.target_question_count || 0 }} 轮</span><progress aria-label="面试完成进度" :value="state.turn || 0" :max="state.target_question_count || 1" /></div>
         <div v-if="error" class="room-error" role="alert">{{ error }}</div>
         <div v-if="!connected && active" class="reconnect-row"><span>连接已断开，未发送的回答仍保留。</span><button class="room-button" @click="connect"><RefreshCw :size="16" />重新连接</button></div>
         <div v-if="!active && !state.session_id" class="reconnect-row"><button class="room-button" @click="load">重新加载</button><router-link to="/">返回工作台</router-link></div>
 
+        <BusinessScenarioBrief v-if="state.interview_mode === 'BUSINESS_SCENARIO' && state.business_scenario" :scenario="state.business_scenario" />
         <div v-if="state.session_id" class="room-layout">
           <section class="room-conversation">
-            <div class="interviewer-label"><span class="interviewer-avatar"><AudioLines :size="22" /></span><div><strong>MianMian 面试官</strong><small>{{ busy ? '正在准备下一步…' : '等待你的回答' }}</small></div><span class="room-question-number">{{ String(Math.min((state.turn || 0) + 1, state.target_question_count)).padStart(2, '0') }}</span></div>
+            <div class="interviewer-label"><span class="interviewer-identity" aria-hidden="true">M</span><div><strong>MianMian 面试官</strong><small>{{ busy ? '正在准备下一步…' : playing ? '正在朗读问题' : '等待你的回答' }}</small></div><span class="room-question-number">{{ String(Math.min((state.turn || 0) + 1, state.target_question_count)).padStart(2, '0') }}</span></div>
             <h2 class="room-question" tabindex="0">{{ state.question || '面试已结束' }}</h2>
-            <div class="question-audio"><button class="room-button" :disabled="speechBusy || locked || !active" @click="speak"><LoaderCircle v-if="speechBusy" class="spin" :size="16" /><Volume2 v-else :size="16" />{{ speechBusy ? '正在合成…' : '朗读问题' }}</button><audio v-if="questionAudio" ref="questionPlayer" :src="questionAudio" controls /></div>
+            <div class="question-audio"><button class="room-button question-play" :class="{'is-playing': playing}" :disabled="speechBusy || locked || !active" @click="speak"><LoaderCircle v-if="speechBusy" class="spin" :size="16" /><Pause v-else-if="playing" :size="16" /><Volume2 v-else :size="16" />{{ speechBusy ? '正在准备语音…' : playing ? '暂停朗读' : audioEnded ? '重新朗读' : questionAudio ? '继续朗读' : '朗读问题' }}</button><span v-if="questionAudio" class="audio-time" aria-live="off">{{ duration(audioPosition * 1000) }} / {{ duration(audioDuration * 1000) }}</span><audio v-if="questionAudio" ref="questionPlayer" :src="questionAudio" @play="playing = true; audioEnded = false" @pause="playing = false" @ended="playing = false; audioEnded = true" @timeupdate="audioPosition = $event.target.currentTime" @loadedmetadata="audioDuration = Number.isFinite($event.target.duration) ? $event.target.duration : 0" @error="error = '语音播放失败，请重新朗读'; stopQuestionAudio()" /></div>
 
             <form class="room-composer" @submit.prevent="submit">
               <div class="composer-heading"><label for="interview-answer">你的回答</label><span :class="{overlimit: answer.length > MAX_ANSWER_CHARACTERS}">{{ answer.length }} / {{ MAX_ANSWER_CHARACTERS }}</span></div>
@@ -48,10 +49,11 @@
 <script setup>
 import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { AudioLines, ChevronDown, Clock3, LoaderCircle, LogOut, Mic, RefreshCw, Send, Square, Volume2 } from 'lucide-vue-next'
+import { AudioLines, ChevronDown, Clock3, LoaderCircle, LogOut, Mic, Pause, RefreshCw, Send, Square, Volume2 } from 'lucide-vue-next'
 import { API, request, wsUrl } from '../api'
 import { styleName } from '../interviewStyles'
 import LogoutButton from '../components/LogoutButton.vue'
+import BusinessScenarioBrief from '../components/BusinessScenarioBrief.vue'
 import { MAX_RECORDING_MS, MAX_AUDIO_BYTES, MAX_ANSWER_CHARACTERS, RECORDING_AUDIO_BITRATE } from '../interviewLimits'
 
 const route = useRoute(), router = useRouter(), id = route.params.id
@@ -59,6 +61,7 @@ const state = ref({history: [], turn: 0}), answer = ref(''), error = ref('')
 const loading = ref(true), connected = ref(false), busy = ref(false), finishing = ref(false), showFinish = ref(false)
 const recording = ref(false), requestingMic = ref(false), transcribing = ref(false), speechBusy = ref(false)
 const recordedUrl = ref(''), questionAudio = ref(''), questionPlayer = ref(null), asrFailed = ref(false), voiceNotice = ref('')
+const playing = ref(false), audioEnded = ref(false), audioPosition = ref(0), audioDuration = ref(0)
 const now = ref(Date.now()), recordStarted = ref(0)
 const active = computed(() => state.value.status === 'IN_PROGRESS')
 const locked = computed(() => busy.value || finishing.value || recording.value || requestingMic.value || transcribing.value)
@@ -76,6 +79,7 @@ function stopQuestionAudio() {
   speechVersion++; speechController?.abort(); speechBusy.value = false
   questionPlayer.value?.pause(); questionPlayer.value?.removeAttribute('src'); questionPlayer.value?.load()
   releaseUrl(questionAudio)
+  playing.value = false; audioEnded.value = false; audioPosition.value = 0; audioDuration.value = 0
 }
 function clearAudio() { stopQuestionAudio(); releaseUrl(recordedUrl); recordedBlob = null; asrFailed.value = false; voiceNotice.value = '' }
 function applyState(data) {
@@ -122,6 +126,11 @@ async function finish() {
 }
 async function speak() {
   if(speechBusy.value || locked.value || !active.value)return
+  if (questionAudio.value && questionPlayer.value) {
+    if (playing.value) questionPlayer.value.pause()
+    else { if (audioEnded.value) questionPlayer.value.currentTime = 0; await playQuestion() }
+    return
+  }
   stopQuestionAudio(); speechController = new AbortController(); const current = speechVersion
   speechBusy.value = true; error.value = ''
   const question = state.value.question
@@ -133,8 +142,12 @@ async function speak() {
     const blob = await response.blob()
     if(disposed || current !== speechVersion || state.value.question !== question)return
     releaseUrl(questionAudio); questionAudio.value = URL.createObjectURL(blob)
-    await nextTick(); await questionPlayer.value?.play().catch(() => {})
+    await nextTick(); await playQuestion()
   } catch(e) { if(!disposed && current === speechVersion && e.name !== 'AbortError')error.value = e.message } finally { if(current === speechVersion)speechBusy.value = false }
+}
+async function playQuestion() {
+  try { await questionPlayer.value?.play() }
+  catch { error.value = '语音已准备好，请再次点击朗读按钮播放' }
 }
 async function transcribe() {
   if(!recordedBlob || transcribing.value)return
@@ -191,6 +204,8 @@ onUnmounted(() => { disposed = true; controller.abort(); clearInterval(ticker); 
 </script>
 
 <style scoped>
+.interviewer-identity{display:grid;place-items:center;width:40px;height:40px;flex-shrink:0;border-radius:50%;background:#edf2ef;color:#496858;font-size:21px;font-weight:700;user-select:none}
+.question-play{min-width:132px;justify-content:center}.question-play.is-playing{background:#e7f2eb;border-color:#90b7a0;color:#216c55}.audio-time{font-size:12px;font-variant-numeric:tabular-nums;color:#718178}.question-audio audio{display:none}
 .room-account-actions{display:flex;gap:10px;flex-wrap:wrap;justify-content:flex-end}
 .interview-room{min-height:100vh;background:#f5f7f7;color:#202826;letter-spacing:0;font-family:inherit}
 .room-header{margin:0;padding:16px var(--page-gutter);background:#fff;border-bottom:1px solid #dde5e2}

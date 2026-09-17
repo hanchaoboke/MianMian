@@ -141,7 +141,7 @@ def test_long_text_all_n_and_missing_times_render_in_one_page():
     pdf = sheet.render_pdf(data, details)
     reader = PdfReader(BytesIO(pdf)); text = reader.pages[0].extract_text()
     assert len(reader.pages) == 1 and '暂不计算' in text and '待补面' in text
-    assert '未记录' in text and '未设置' in text
+    assert '未记录' in text and '未分班' in text
 
 
 def test_usage_is_attributed_to_student_and_cached_downloads_are_free(client, monkeypatch):

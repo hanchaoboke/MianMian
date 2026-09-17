@@ -6,6 +6,7 @@ import base64
 import hmac
 import logging
 import random
+import shutil
 from contextlib import suppress
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -17,14 +18,15 @@ from urllib.parse import quote
 from fastapi import FastAPI, File, Form, Header, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
-from pydantic import BaseModel, Field, ConfigDict, ValidationError
+from pydantic import BaseModel, Field, ConfigDict, ValidationError, model_validator
 from starlette.concurrency import run_in_threadpool
 
-from .graph import interview_graph, summarize_interview, review_question, generate_reference_answer, compare_retry
+from .graph import interview_graph, summarize_interview, review_question, generate_reference_answer, compare_retry, professionalize_question
 from .services import (MAX_UPLOAD, MAX_AUDIO_UPLOAD, MAX_ANSWER_CHARACTERS, ServiceError, ExtractedQuestion, settings, usage_user, deepseek_extract_questions,
                        extract_document_text, save_upload, siliconflow_asr, siliconflow_tts)
 from .storage import store
-from . import evaluation_sheet
+from .services import storage_locations
+from . import evaluation_sheet, evaluation_templates
 
 app = FastAPI(title='MianMian 面面俱道', version='0.2.0')
 app.add_middleware(CORSMiddleware, allow_origins=['http://localhost:5173', 'http://127.0.0.1:5173'],
@@ -74,6 +76,81 @@ def current_user(authorization: str | None = None, role: str | None = None):
 class LoginPayload(BaseModel):
     username: str = Field(min_length=2, max_length=50)
     password: str = Field(min_length=6, max_length=128)
+
+
+def storage_admin(authorization):
+    # Storage configuration never uses the development-mode authentication shortcut.
+    if not authorization:
+        raise HTTPException(401, '请先使用管理员账号登录')
+    return current_user(authorization, 'ADMIN')
+
+
+class DeploymentStorage(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra='forbid')
+    postgres: str = Field(default='', max_length=1024)
+    redis: str = Field(default='', max_length=1024)
+    uploads: str = Field(default='', max_length=1024)
+
+
+class StoragePayload(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra='forbid')
+    data_dir: str = Field(min_length=1, max_length=1024)
+    revision: int = Field(ge=0)
+    deployment: DeploymentStorage = Field(default_factory=DeploymentStorage)
+
+
+def storage_status():
+    state = storage_locations.read()
+    database = {'engine': 'PostgreSQL' if store.postgres else 'SQLite', **store.overview()}
+    if store.postgres:
+        from psycopg.conninfo import conninfo_to_dict
+        connection = conninfo_to_dict(settings.postgres_dsn)
+        database.update(host=connection.get('host', '本地 socket'), port=connection.get('port', '5432'),
+                        name=connection.get('dbname', ''))
+    else:
+        database['path'] = str(store.path.resolve())
+    try:
+        free_bytes = shutil.disk_usage(settings.data_dir).free
+    except OSError:
+        free_bytes = None
+    return {**state, 'default_dir': str(storage_locations.default), 'active_dir': str(settings.data_dir),
+            'database': database, 'free_bytes': free_bytes, 'in_container': Path('/.dockerenv').exists()}
+
+
+@app.get('/api/v1/admin/storage')
+def get_storage(authorization: str | None = Header(default=None)):
+    storage_admin(authorization)
+    return storage_status()
+
+
+@app.post('/api/v1/admin/storage/check')
+def check_storage(payload: StoragePayload, authorization: str | None = Header(default=None)):
+    storage_admin(authorization)
+    try:
+        target = storage_locations.validate(payload.data_dir)
+        storage_locations.validate_deployment(payload.deployment.model_dump())
+        return {'data_dir': str(target), 'free_bytes': shutil.disk_usage(target).free,
+                'message': '服务器目录可以读写。Docker 宿主机目录需在部署时检查挂载和权限。'}
+    except (ValueError, OSError) as exc:
+        raise HTTPException(422, '无法使用此目录：' + str(exc)) from exc
+
+
+@app.put('/api/v1/admin/storage')
+def save_storage(payload: StoragePayload, authorization: str | None = Header(default=None)):
+    storage_admin(authorization)
+    try:
+        storage_locations.save(payload.data_dir, payload.revision, payload.deployment.model_dump())
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except (ValueError, OSError) as exc:
+        raise HTTPException(422, '设置未保存：' + str(exc)) from exc
+    return storage_status()
+
+
+@app.get('/api/v1/admin/storage/compose')
+def export_storage_compose(authorization: str | None = Header(default=None)):
+    storage_admin(authorization)
+    return {'filename': 'docker-compose.storage.yml', 'content': storage_locations.compose()}
 
 class TeacherUserPayload(LoginPayload):
     display_name: str = Field(default='', max_length=80)
@@ -257,7 +334,7 @@ async def document_upload(file, resume=False):
 
 @app.get('/api/health')
 def health():
-    return {'status': 'ok', 'service': 'mianmian-backend', 'storage': 'sqlite',
+    return {'status': 'ok', 'service': 'mianmian-backend', 'storage': 'postgresql' if store.postgres else 'sqlite',
             'llm': settings.deepseek_model, 'asr': settings.asr_model, 'tts': settings.tts_model,
             'llm_configured': bool(settings.deepseek_api_key), 'audio_configured': bool(settings.siliconflow_api_key)}
 
@@ -366,16 +443,69 @@ def commit_questions(id: str, payload: CommitQuestions, authorization: str | Non
 
 
 @app.get('/api/v1/teacher/question-bank')
-def list_questions(authorization: str | None = Header(default=None), page: int | None = Query(default=None, ge=1), job_track: str | None = None):
+def list_questions(authorization: str | None = Header(default=None), page: int | None = Query(default=None, ge=1), job_track: str | None = None, state: Literal['active', 'trash'] = 'active'):
     current_user(authorization, 'TEACHER,ADMIN')
     items = store.list('question')
+    counts = {'active': sum(not q.get('deleted_at') for q in items), 'trash': sum(bool(q.get('deleted_at')) for q in items)}
+    items = [q for q in items if bool(q.get('deleted_at')) == (state == 'trash')]
+    if state == 'trash':
+        items.sort(key=lambda q: q['deleted_at'], reverse=True)
     tracks = sorted({question_track(q) for q in items})
     if job_track is not None:
         items = [q for q in items if question_track(q) == job_track]
     total = len(items)
     if page is not None:
-        return {'items': items[(page - 1) * 10:page * 10], 'total': total, 'page': page, 'page_size': 10, 'tracks': tracks}
-    return {'items': items, 'total': total, 'tracks': tracks}
+        return {'items': items[(page - 1) * 10:page * 10], 'total': total, 'page': page, 'page_size': 10, 'tracks': tracks, 'counts': counts}
+    return {'items': items, 'total': total, 'tracks': tracks, 'counts': counts}
+
+
+def teacher_actor(authorization):
+    if not authorization:
+        raise HTTPException(401, '请先登录')
+    return current_user(authorization, 'TEACHER,ADMIN')
+
+
+@app.post('/api/v1/teacher/question-bank/{id}/trash')
+def trash_question(id: str, authorization: str | None = Header(default=None)):
+    actor = teacher_actor(authorization)
+    def change(q):
+        if not q.get('deleted_at'):
+            q.update(deleted_at=now(), deleted_by=actor['user_id'])
+    result = store.mutate('question', id, change)
+    if result is None:
+        raise HTTPException(404, '题目不存在')
+    return result
+
+
+@app.post('/api/v1/teacher/question-bank/{id}/restore')
+def restore_question(id: str, authorization: str | None = Header(default=None)):
+    teacher_actor(authorization)
+    def change(q):
+        q.pop('deleted_at', None)
+        q.pop('deleted_by', None)
+    result = store.mutate('question', id, change)
+    if result is None:
+        raise HTTPException(404, '题目不存在')
+    return result
+
+
+@app.delete('/api/v1/teacher/question-bank/{id}')
+def delete_question(id: str, authorization: str | None = Header(default=None)):
+    teacher_actor(authorization)
+    try:
+        deleted = store.delete_trashed_question(id)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    if not deleted:
+        raise HTTPException(404, '题目不存在')
+    return {'ok': True}
+
+
+def active_question(id):
+    question = require('question', id)
+    if question.get('deleted_at'):
+        raise HTTPException(409, '题目已移入回收箱，请刷新题库')
+    return question
 
 
 def question_track(question):
@@ -387,6 +517,8 @@ def student_question_tracks(authorization: str | None = Header(default=None)):
     current_user(authorization)
     tracks = {}
     for q in store.list('question'):
+        if q.get('deleted_at'):
+            continue
         track = question_track(q)
         tracks[track] = tracks.get(track, 0) + 1
     return {'items': [{'job_track': name, 'question_count': count} for name, count in sorted(tracks.items())]}
@@ -395,6 +527,8 @@ def student_question_tracks(authorization: str | None = Header(default=None)):
 def choose_track_questions(tracks, count, difficulty=None):
     groups = {track: [] for track in dict.fromkeys(tracks)}
     for q in store.list('question'):
+        if q.get('deleted_at'):
+            continue
         if question_track(q) in groups:
             groups[question_track(q)].append(q)
     if any(not questions for questions in groups.values()):
@@ -432,7 +566,7 @@ class UpdateAnswer(BaseModel):
 @app.post('/api/v1/teacher/question-bank/{id}/suggest-answer')
 async def suggest_question_answer(id: str, authorization: str | None = Header(default=None)):
     actor = current_user(authorization, 'TEACHER,ADMIN')
-    question = require('question', id)
+    question = active_question(id)
     answer = await generate_reference_answer(question['question'], question_track(question), actor['user_id'])
     return {'question_id': id, 'answer': answer}
 
@@ -460,12 +594,21 @@ async def tts(text: str = Form(..., min_length=1, max_length=2000), voice: str =
     return Response(await siliconflow_tts(text, voice=voice, tone=tone), media_type='audio/mpeg', headers={'Cache-Control': 'no-store'})
 
 
+class BusinessScenario(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra='forbid')
+    requirement: str = Field(min_length=10, max_length=4000)
+    constraints: str = Field(default='', max_length=2000)
+    success_criteria: str = Field(default='', max_length=2000)
+
+
 class InterviewCreate(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
     job_track: str = Field(default='AI 应用开发工程师', min_length=1, max_length=100)
     interviewer_style: Literal['HARDCORE', 'GUIDING', 'BUSINESS', 'CREATIVE', 'ALL_ROUND'] = 'HARDCORE'
     resume_id: str | None = None
     resume_text: str = Field(default='', max_length=80000)
+    interview_mode: Literal['RESUME', 'BUSINESS_SCENARIO'] = 'RESUME'
+    business_scenario: BusinessScenario | None = None
     target_question_count: int = Field(default=5, ge=1, le=10)
     question_ids: list[str] = Field(default_factory=list, max_length=20)
     knowledge_tracks: list[str] = Field(default_factory=list, max_length=10)
@@ -476,12 +619,20 @@ class InterviewCreate(BaseModel):
     user_id: str | None = None
     temporary_questions: list[ExtractedQuestion] = Field(default_factory=list, max_length=150)
 
+    @model_validator(mode='after')
+    def require_business_scenario(self):
+        if self.interview_mode == 'BUSINESS_SCENARIO' and self.business_scenario is None:
+            raise ValueError('请填写企业业务需求后开始面试')
+        return self
+
 
 @app.post('/api/v1/interviews', status_code=201)
 async def create_interview(payload: InterviewCreate, authorization: str | None = Header(default=None)):
     user = current_user(authorization)
-    resume_text = require('resume', payload.resume_id)['text'] if payload.resume_id else payload.resume_text
-    questions = [require('question', id) for id in dict.fromkeys(payload.question_ids) if not id.startswith('temp-')]
+    business_mode = payload.interview_mode == 'BUSINESS_SCENARIO'
+    resume_id = None if business_mode else payload.resume_id
+    resume_text = '' if business_mode else require('resume', resume_id)['text'] if resume_id else payload.resume_text
+    questions = [active_question(id) for id in dict.fromkeys(payload.question_ids) if not id.startswith('temp-')]
     defaults = {'1':'EASY','1-3':'MEDIUM','3-5':'HARD','5-7':'HARD','7+':'HARD'}
     class_record = store.get('class', user.get('class_name')) if user.get('class_name') else None
     difficulty = (class_record or {}).get('difficulty_by_experience', defaults).get(payload.experience_years, defaults[payload.experience_years])
@@ -493,12 +644,14 @@ async def create_interview(payload: InterviewCreate, authorization: str | None =
         raise HTTPException(422, '选择的题目内容过多，请减少题目数量')
     state = {'job_track': payload.job_track, 'style': payload.interviewer_style, 'experience_years': payload.experience_years, 'difficulty': difficulty, 'interviewer_voice': payload.interviewer_voice, 'interviewer_tone': payload.interviewer_tone, 'resume_text': resume_text, 'user_id': user['user_id'],
              'question_expression': payload.question_expression,
+             'interview_mode': payload.interview_mode,
+             'business_scenario': payload.business_scenario.model_dump() if business_mode else None,
              'question_bank': questions, 'turn': 0, 'answer': '', 'history': [],
              'target_question_count': payload.target_question_count}
     result = await interview_graph.ainvoke(state)
     id = str(uuid4())
-    session = {**state, 'session_id': id, 'knowledge_tracks': list(dict.fromkeys(payload.knowledge_tracks)), 'resume_id': payload.resume_id, 'question': result['next_question'],
-               'status': 'IN_PROGRESS', 'started_at': now()}
+    session = {**state, 'session_id': id, 'knowledge_tracks': list(dict.fromkeys(payload.knowledge_tracks)), 'resume_id': resume_id, 'question': result['next_question'],
+               'status': 'IN_PROGRESS', 'started_at': now(), 'class_name': user.get('class_name', '')}
     store.put('session', id, session)
     return public_session(session)
 
@@ -506,6 +659,7 @@ async def create_interview(payload: InterviewCreate, authorization: str | None =
 def public_session(s):
     return {**{k:s[k] for k in ['session_id', 'question', 'turn', 'target_question_count', 'status', 'started_at', 'job_track', 'style', 'resume_id']}, 'interviewer_voice': s.get('interviewer_voice', ''), 'interviewer_tone': s.get('interviewer_tone', 'professional'),
             'question_expression': s.get('question_expression', 3),
+            'interview_mode': s.get('interview_mode', 'RESUME'), 'business_scenario': s.get('business_scenario'),
             'history': [{k: t[k] for k in ('turn', 'question', 'answer')} for t in s['history']],
             'question_ids': [q['id'] for q in s['question_bank']]}
 
@@ -529,6 +683,7 @@ def student_interviews(day: date | None = None, authorization: str | None = Head
             continue
         items.append({**{key: session[key] for key in ('session_id', 'job_track', 'style', 'started_at', 'status', 'turn', 'target_question_count')},
                       'ended_at': session.get('ended_at'), 'date': session_day,
+                      'interview_mode': session.get('interview_mode', 'RESUME'),
                       'has_report': session['status'] == 'COMPLETED' and bool(session['history'])})
     items.sort(key=lambda item: (datetime.fromisoformat(item['started_at'].replace('Z', '+00:00')).timestamp(), item['session_id']), reverse=True)
     return {'items': items, 'dates': dates, 'total': len(items), 'timezone': 'Asia/Shanghai'}
@@ -750,18 +905,127 @@ async def finish_interview(id: str, authorization: str | None = Header(default=N
 @app.get('/api/v1/interviews/{id}/report')
 def report(id: str, authorization: str | None = Header(default=None)):
     s = accessible_session(id, authorization)
+    return report_data(s, student=True)
+
+
+def report_data(s, student=False):
+    id = s['session_id']
     if s['status'] != 'COMPLETED':
         raise HTTPException(409, '面试结束后可查看诊断报告')
     if not s['history']:
         raise HTTPException(409, '至少完成一次回答后才能查看报告')
-    bookmarks = store.student_bookmarks(s.get('user_id', ''), session_id=id)['items']
+    bookmarks = store.student_bookmarks(s.get('user_id', ''), session_id=id)['items'] if student else []
     marked = {item['turn']: item['id'] for item in bookmarks}
     turns = [{**t, 'bookmark_id': marked.get(t['turn'])} for t in s['history']]
     dimensions = {key: round(sum(t['dimensions'][key] for t in turns) / len(turns)) for key in turns[0]['dimensions']}
     return {'session_id': id, 'overall_score': round(sum(t['score'] for t in turns)/len(turns)),
+            'interview_mode': s.get('interview_mode', 'RESUME'), 'business_scenario': s.get('business_scenario'),
             'dimensions': dimensions, 'summary': f'已完成 {len(turns)} 轮回答，以下为 DeepSeek 逐轮评估汇总。',
             'recommendations': [t['feedback'] for t in sorted(turns, key=lambda t: t['score'])[:3]], 'turns': turns,
             'interview_summary': s.get('interview_summary')}
+
+
+def teacher_report_session(id, authorization):
+    actor = teacher_actor(authorization)
+    session = require('session', id)
+    owner = store.get('user', session.get('user_id', ''))
+    if not owner or owner.get('role') != 'STUDENT':
+        raise HTTPException(404, '学生面试记录不存在')
+    if session['status'] != 'COMPLETED' or not session['history']:
+        raise HTTPException(409, '至少完成一次回答并结束面试后才能查看报告')
+    return actor, session, owner
+
+
+def report_question_id(id, turn):
+    return 'report-' + hashlib.sha256(f'{id}:{turn}'.encode()).hexdigest()
+
+
+@app.get('/api/v1/teacher/interviews')
+def teacher_interviews(authorization: str | None = Header(default=None), page: int = Query(default=1, ge=1),
+                       search: str = Query(default='', max_length=100), class_name: str | None = None):
+    teacher_actor(authorization)
+    students = {u['user_id']: u for u in store.list('user') if u.get('role') == 'STUDENT'}
+    items = []
+    for s in store.list('session'):
+        student = students.get(s.get('user_id'))
+        if not student or s.get('status') != 'COMPLETED' or not s.get('history'):
+            continue
+        if class_name is not None and student.get('class_name', '') != class_name:
+            continue
+        if search.strip().casefold() not in ' '.join(student.get(k, '') for k in ('display_name', 'username')).casefold():
+            continue
+        items.append({**{k: s.get(k) for k in ('session_id', 'job_track', 'started_at', 'ended_at', 'style')},
+                      'interview_mode': s.get('interview_mode', 'RESUME'),
+                      'student': {k: student.get(k, '') for k in ('user_id', 'display_name', 'username', 'class_name')},
+                      'turn_count': len(s['history']), 'overall_score': round(sum(t['score'] for t in s['history']) / len(s['history']))})
+    items.sort(key=lambda s: s['started_at'] or '', reverse=True)
+    page = min(page, max(1, (len(items) + 9) // 10))
+    return {'items': items[(page - 1) * 10:page * 10], 'total': len(items), 'page': page, 'page_size': 10,
+            'classes': sorted({u.get('class_name', '') for u in students.values()})}
+
+
+@app.get('/api/v1/teacher/interviews/{id}/report')
+def teacher_report(id: str, authorization: str | None = Header(default=None)):
+    _, session, owner = teacher_report_session(id, authorization)
+    data = report_data(session)
+    for turn in data['turns']:
+        q = store.get('question', report_question_id(id, turn['turn']))
+        turn['bank_question_id'] = q['id'] if q else None
+        turn['bank_trashed'] = bool(q and q.get('deleted_at'))
+    return {**data, 'student': {k: owner.get(k, '') for k in ('display_name', 'username', 'class_name')},
+            'job_track': session.get('job_track'), 'started_at': session.get('started_at')}
+
+
+@app.post('/api/v1/teacher/interviews/{id}/summary')
+async def teacher_summary(id: str, authorization: str | None = Header(default=None)):
+    actor, _, _ = teacher_report_session(id, authorization)
+    async with locks.setdefault(id, asyncio.Lock()):
+        session = require('session', id)
+        if not session.get('interview_summary'):
+            session['interview_summary'] = await summarize_interview({**session, 'user_id': actor['user_id']})
+            store.put('session', id, session)
+        return session['interview_summary']
+
+
+@app.post('/api/v1/teacher/interviews/{id}/questions/{turn}/draft')
+async def report_question_draft(id: str, turn: int, authorization: str | None = Header(default=None)):
+    actor, session, _ = teacher_report_session(id, authorization)
+    source = next((t for t in session['history'] if t['turn'] == turn), None)
+    if source is None:
+        raise HTTPException(404, '面试题目不存在')
+    qid = report_question_id(id, turn)
+    async with locks.setdefault(qid, asyncio.Lock()):
+        draft = store.get('report_question_draft', qid)
+        if draft is None:
+            try:
+                rewritten = await asyncio.wait_for(professionalize_question(session, source, actor['user_id']), timeout=120)
+            except TimeoutError as exc:
+                raise ServiceError('题目改写超时，请重试') from exc
+            draft = {**rewritten, 'id': qid, 'job_track': session.get('job_track') or '通用岗位',
+                     'difficulty': session.get('difficulty') if session.get('difficulty') in ('EASY', 'MEDIUM', 'HARD') else 'MEDIUM',
+                     'answer': '', 'source_quote': source['question'], 'source_session_id': id, 'source_turn': turn,
+                     'source_file': '学生面试 · 第 ' + str(turn) + ' 轮', 'created_at': now()}
+            store.put('report_question_draft', qid, draft)
+        return draft
+
+
+class SaveReportQuestion(BaseModel):
+    model_config = ConfigDict(extra='forbid', str_strip_whitespace=True)
+    question: str = Field(min_length=1, max_length=4000)
+    category: str = Field(min_length=1, max_length=100)
+    job_track: str = Field(min_length=1, max_length=100)
+    difficulty: Literal['EASY', 'MEDIUM', 'HARD']
+    answer: str = Field(default='', max_length=12000)
+
+
+@app.post('/api/v1/teacher/interviews/{id}/questions/{turn}/commit')
+def save_report_question(id: str, turn: int, payload: SaveReportQuestion, authorization: str | None = Header(default=None)):
+    actor, _, _ = teacher_report_session(id, authorization)
+    qid = report_question_id(id, turn)
+    draft = require('report_question_draft', qid)
+    record = {**draft, **payload.model_dump(), 'created_by': actor['user_id'], 'created_at': now()}
+    # The stable source id and atomic insert prevent duplicate collection by different teachers.
+    return store.mutate('question', qid, lambda q: None, initial=record)
 
 
 @app.post('/api/v1/interviews/{id}/summary')
@@ -777,6 +1041,73 @@ async def create_interview_summary(id: str, authorization: str | None = Header(d
         return session['interview_summary']
 
 
+def resolve_evaluation_template(job_track, class_name=''):
+    for name in dict.fromkeys([class_name, '']):
+        record = store.get('evaluation_template', evaluation_templates.scope_id(job_track, name))
+        if record:
+            return {**record, 'source': 'class' if name else 'job'}
+    return evaluation_templates.default_template(job_track)
+
+
+def validate_template_class(name):
+    if name and not any(c['name'] == name for c in class_roster()['items']):
+        raise HTTPException(422, '请先在班级管理中创建班级')
+
+
+@app.get('/api/v1/teacher/evaluation-templates')
+def list_evaluation_templates(authorization: str | None = Header(default=None)):
+    teacher_actor(authorization)
+    return {'items': sorted(store.list('evaluation_template'), key=lambda t: (t['job_track'], t['class_name'])),
+            'classes': [c['name'] for c in class_roster()['items']]}
+
+
+@app.get('/api/v1/teacher/evaluation-templates/resolve')
+def get_template_for_scope(job_track: str = Query(min_length=1, max_length=100),
+                           class_name: str = Query(default='', max_length=100), authorization: str | None = Header(default=None)):
+    teacher_actor(authorization)
+    if not job_track.strip():
+        raise HTTPException(422, '请填写目标岗位')
+    scope = evaluation_templates.TemplateScope(job_track=job_track, class_name=class_name)
+    validate_template_class(scope.class_name)
+    return resolve_evaluation_template(scope.job_track, scope.class_name)
+
+
+@app.post('/api/v1/teacher/evaluation-templates/suggest')
+async def suggest_evaluation_template(payload: evaluation_templates.TemplateScope, authorization: str | None = Header(default=None)):
+    actor = teacher_actor(authorization)
+    validate_template_class(payload.class_name)
+    return {**payload.model_dump(), **await evaluation_templates.suggest(payload, actor['user_id'])}
+
+
+@app.put('/api/v1/teacher/evaluation-templates')
+def save_evaluation_template(payload: evaluation_templates.TemplateSave, authorization: str | None = Header(default=None)):
+    actor = teacher_actor(authorization)
+    validate_template_class(payload.class_name)
+    id = evaluation_templates.scope_id(payload.job_track, payload.class_name)
+    def save(record):
+        if record.get('revision', 0) != payload.revision:
+            raise HTTPException(409, '此模板已被其他教师更新，请重新加载已保存版本后再修改。当前草稿不会丢失。')
+        record.update(**payload.model_dump(), id=id, updated_by=actor['user_id'], updated_at=now())
+        record['revision'] += 1
+    return store.mutate('evaluation_template', id, save, {})
+
+
+@app.post('/api/v1/teacher/evaluation-templates/preview.pdf')
+async def preview_evaluation_template(payload: evaluation_templates.TemplateSave, authorization: str | None = Header(default=None)):
+    teacher_actor(authorization)
+    template = payload.model_dump()
+    # No fabricated student scores; this is a layout preview of the unsaved draft.
+    assessment = {'criteria': {item['key']: {'score': None, 'evidence': '预览占位：实际下载时依据本场回答填写。', 'sources': []}
+                              for item in template['items']},
+                  'project': '预览占位：学生提及的项目或企业业务模拟方案。', 'strengths': '根据本场回答填写。',
+                  'risks': '根据本场回答填写。', 'follow_up': '根据面试证据给出下一步建议。'}
+    details = {'name': '学生姓名（预览）', 'class_name': payload.class_name or '学生所在班级',
+               'date': '面试日期', 'duration': '-', 'rounds': '-'}
+    pdf = await run_in_threadpool(evaluation_sheet.render_pdf, assessment, details, template)
+    return Response(pdf, media_type='application/pdf', headers={'Cache-Control': 'private, no-store',
+        'Content-Disposition': 'attachment; filename="evaluation-template-preview.pdf"'})
+
+
 def evaluation_source(id, authorization):
     user = signed_in_student(authorization)
     session = require('session', id)
@@ -787,12 +1118,20 @@ def evaluation_source(id, authorization):
     return session, user
 
 
-def sheet_status(record):
-    if not record or record.get('version') != evaluation_sheet.VERSION:
+def session_evaluation_template(session, user):
+    # New sessions preserve their original class when a student later transfers.
+    return resolve_evaluation_template(session.get('job_track') or '未设置岗位', session.get('class_name', user.get('class_name', '')))
+
+
+def sheet_status(record, template=None):
+    if not record or record.get('version') != evaluation_sheet.VERSION or (template is not None and
+            record.get('template_fingerprint') != evaluation_templates.fingerprint(template)):
         return {'status': 'pending'}
     if record.get('pdf'):
         return {'status': 'ready', 'generated_at': record['generated_at'],
-                **evaluation_sheet.conclusion(record['assessment'])}
+                'template_job': record.get('template', {}).get('job_track'),
+                'template_class': record.get('template', {}).get('class_name'),
+                **evaluation_sheet.conclusion(record['assessment'], record.get('template'))}
     if record.get('lease_until', '') > now():
         return {'status': 'generating'}
     return {'status': 'failed' if record.get('error') else 'pending', 'error': record.get('error')}
@@ -800,19 +1139,21 @@ def sheet_status(record):
 
 @app.get('/api/v1/interviews/{id}/evaluation-sheet')
 def get_evaluation_sheet(id: str, authorization: str | None = Header(default=None)):
-    evaluation_source(id, authorization)
-    return sheet_status(store.get('evaluation_sheet', id))
+    session, user = evaluation_source(id, authorization)
+    return sheet_status(store.get('evaluation_sheet', id), session_evaluation_template(session, user))
 
 
 @app.post('/api/v1/interviews/{id}/evaluation-sheet')
 async def create_evaluation_sheet(id: str, authorization: str | None = Header(default=None)):
     session, user = evaluation_source(id, authorization)
+    template = session_evaluation_template(session, user)
+    fingerprint = evaluation_templates.fingerprint(template)
     lease = uuid4().hex
 
     def claim(record):
-        if record.get('version') != evaluation_sheet.VERSION:
+        if record.get('version') != evaluation_sheet.VERSION or record.get('template_fingerprint') != fingerprint:
             record.clear()
-            record.update(version=evaluation_sheet.VERSION, user_id=user['user_id'])
+            record.update(version=evaluation_sheet.VERSION, user_id=user['user_id'], template=template, template_fingerprint=fingerprint)
         if record.get('pdf') or record.get('lease_until', '') > now():
             return
         record.update(lease=lease, lease_until=(datetime.now(timezone.utc)+timedelta(minutes=5)).isoformat(), error=None)
@@ -825,14 +1166,14 @@ async def create_evaluation_sheet(id: str, authorization: str | None = Header(de
     try:
         assessment = record.get('assessment')
         if not assessment:
-            assessment = await asyncio.wait_for(evaluation_sheet.assess(session), timeout=240)
+            assessment = await asyncio.wait_for(evaluation_sheet.assess(session, template), timeout=240)
             def save_assessment(row):
                 if row.get('lease') != lease:
                     raise HTTPException(409, '评价表生成状态已更新，请刷新重试')
                 row['assessment'] = assessment
             store.mutate('evaluation_sheet', id, save_assessment)
         details = record.get('details') or evaluation_sheet.metadata(session, user)
-        pdf = await run_in_threadpool(evaluation_sheet.render_pdf, assessment, details)
+        pdf = await run_in_threadpool(evaluation_sheet.render_pdf, assessment, details, template)
         def complete(row):
             if row.get('lease') != lease:
                 raise HTTPException(409, '评价表生成状态已更新，请刷新重试')
@@ -855,10 +1196,10 @@ async def create_evaluation_sheet(id: str, authorization: str | None = Header(de
 
 @app.get('/api/v1/interviews/{id}/evaluation-sheet.pdf')
 def download_evaluation_sheet(id: str, authorization: str | None = Header(default=None)):
-    evaluation_source(id, authorization)
+    session, user = evaluation_source(id, authorization)
     record = store.get('evaluation_sheet', id)
-    if sheet_status(record)['status'] != 'ready':
-        raise HTTPException(409, '评价表尚未生成，请在诊断页等待生成或重试')
+    if sheet_status(record, session_evaluation_template(session, user))['status'] != 'ready':
+        raise HTTPException(409, '评价表尚未生成或教师已更新模板，请刷新诊断页重新生成')
     filename = quote(f"面试评价表_{record['details']['name']}_{record['details']['date']}.pdf", safe='')
     return Response(base64.b64decode(record['pdf']), media_type='application/pdf', headers={
         'Content-Disposition': f'attachment; filename="interview-evaluation.pdf"; filename*=UTF-8\'\'{filename}',
@@ -912,6 +1253,8 @@ async def interview_socket(ws: WebSocket, id: str):
                     state = {k:session[k] for k in ['job_track', 'style', 'resume_text', 'question_bank', 'history', 'turn', 'question', 'target_question_count', 'interviewer_voice', 'interviewer_tone'] if k in session}
                     state['user_id'] = session.get('user_id')
                     state['question_expression'] = session.get('question_expression', 3)
+                    state['interview_mode'] = session.get('interview_mode', 'RESUME')
+                    state['business_scenario'] = session.get('business_scenario')
                     state.update({k: session[k] for k in ('experience_years', 'difficulty') if k in session})
                     result = await interview_graph.ainvoke({**state, 'answer': event.text})
                 except ServiceError as exc:

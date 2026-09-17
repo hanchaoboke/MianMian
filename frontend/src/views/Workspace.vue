@@ -1,6 +1,6 @@
 <template>
   <div class="workspace">
-    <section class="hero"><div><span class="pill">AI 应用开发 · 专项训练</span><h2>把每次回答，<em>练成你的优势。</em></h2><p>上传简历，围绕你的项目经历进行提问、追问与复盘。</p><div class="hero-actions"><button class="primary" :disabled="busy" @click="startInterview">{{ busy ? '正在准备…' : '开始本次面试 →' }}</button><button class="secondary" :disabled="busy" @click="showConfig = true">简历与训练设置</button></div></div><div class="hero-orbit"><div class="orbit-ring"/><div class="orb-main">M</div></div></section>
+    <section class="hero"><div><span class="pill">{{ businessMode ? '企业业务 · 落地演练' : 'AI 应用开发 · 专项训练' }}</span><h2>把每次回答，<em>练成你的优势。</em></h2><p>{{ businessMode ? '从企业真实需求出发，练习技术方案、工程取舍与业务交付。' : '从项目经历到企业业务，准备下一场面试。' }}</p><div class="hero-actions"><button class="primary" :disabled="busy" @click="startInterview">{{ busy ? '正在准备…' : '开始本次面试 →' }}</button><button ref="configTrigger" class="secondary" :disabled="busy" @click="showConfig = true">面试与训练设置</button></div></div><div class="hero-orbit"><div class="orbit-ring"/><div class="orb-main">M</div></div></section>
     <p v-if="error" class="error" role="alert">{{ error }}</p>
     <section class="interview-panel history-panel">
       <div class="panel-head"><div><span class="section-kicker">MY INTERVIEWS</span><h3>{{ selectedDate ? `${selectedDate} 的面试` : '我的面试记录' }}</h3></div><div class="history-actions"><button v-if="selectedDate" class="secondary" @click="router.push('/')">全部记录</button><button class="secondary" :disabled="historyLoading" @click="refreshHistory">刷新</button></div></div>
@@ -10,16 +10,25 @@
       <p v-else-if="!filteredHistory.length" class="history-empty">{{ selectedDate ? '当天还没有模拟面试，换个日期看看吧。' : '还没有面试记录，从第一场练习开始吧。' }}</p>
       <article v-for="item in filteredHistory" :key="item.session_id" class="history-entry">
         <component :is="item.has_report ? RouterLink : 'div'" :to="item.has_report ? `/report/${item.session_id}` : undefined" class="history-date" :aria-label="item.has_report ? `${item.date} ${formatTime(item.started_at)} 的面试报告` : undefined"><span>{{ item.date.slice(0,4) }}</span><strong>{{ item.date.slice(5).replace('-', '.') }}</strong><span>{{ formatTime(item.started_at) }}</span></component>
-        <div class="history-info"><h4>{{ item.job_track }}</h4><p>{{ styleName(item.style) }} · 已完成 {{ item.turn }} / {{ item.target_question_count }} 轮</p><span :class="['history-status', {ongoing:item.status === 'IN_PROGRESS'}]">{{ item.status === 'IN_PROGRESS' ? '进行中' : '已结束' }}</span></div>
+        <div class="history-info"><h4>{{ item.job_track }}</h4><p>{{ item.interview_mode === 'BUSINESS_SCENARIO' ? '企业业务 · ' : '' }}{{ styleName(item.style) }} · 已完成 {{ item.turn }} / {{ item.target_question_count }} 轮</p><span :class="['history-status', {ongoing:item.status === 'IN_PROGRESS'}]">{{ item.status === 'IN_PROGRESS' ? '进行中' : '已结束' }}</span></div>
         <router-link v-if="item.has_report" :to="`/report/${item.session_id}`" class="secondary history-link" :aria-label="`${item.date} ${formatTime(item.started_at)} 查看面试诊断`">查看面试诊断 →</router-link>
         <router-link v-else-if="item.status === 'IN_PROGRESS'" :to="`/interview/${item.session_id}`" class="secondary history-link">继续面试 →</router-link>
         <span v-else class="history-unavailable">未完成回答，暂无报告</span>
       </article>
     </section>
 
-    <div v-if="showConfig" class="modal-backdrop" @click.self="!uploading && !busy && (showConfig = false)"><div class="modal config-modal"><div class="config-title"><span class="section-kicker">TRAINING SETUP</span><h3>简历与训练设置</h3><p>先完善训练条件，面试官会据此调整问题方向和难度。</p></div>
+    <div v-if="showConfig" class="modal-backdrop" @click.self="closeConfig"><div ref="configDialog" class="modal config-modal" role="dialog" aria-modal="true" aria-labelledby="config-title" tabindex="-1" @keydown="configKeydown"><div class="config-title"><div><span class="section-kicker">TRAINING SETUP</span><h3 id="config-title">面试与训练设置</h3></div><button class="file-tool config-close" title="关闭设置" aria-label="关闭设置" :disabled="uploading || busy" @click="closeConfig"><X :size="20" /></button></div>
+      <div class="config-body">
       <p v-if="uploadError" class="error" role="alert">{{ uploadError }}</p>
-      <section class="material-section resume-section" aria-labelledby="resume-heading" :aria-busy="uploadKind === 'resume'">
+      <label class="field target-role">目标岗位<input v-model.trim="jobTrack" maxlength="100" :disabled="busy" /></label>
+      <fieldset class="interview-mode"><legend>面试依据</legend><div class="mode-options"><button type="button" :aria-pressed="!businessMode" :disabled="busy || uploading" @click="setMode('RESUME')"><FileText :size="19" /><span><strong>简历经历</strong><small>项目复盘与深挖</small></span><CheckCircle2 v-if="!businessMode" :size="16" /></button><button type="button" :aria-pressed="businessMode" :disabled="busy || uploading" @click="setMode('BUSINESS_SCENARIO')"><BriefcaseBusiness :size="19" /><span><strong>企业业务</strong><small>业务方案与交付</small></span><CheckCircle2 v-if="businessMode" :size="16" /></button></div></fieldset>
+      <section v-if="businessMode" class="material-section business-section" aria-labelledby="business-heading">
+        <div class="material-heading"><h4 id="business-heading">企业业务需求</h4><span class="scenario-tag">无需简历</span></div>
+        <label class="field business-requirement" for="business-requirement">公司想解决什么问题？<textarea id="business-requirement" ref="businessInput" v-model="businessRequirement" maxlength="4000" :disabled="busy" :aria-invalid="!!businessError" :aria-describedby="businessError ? 'business-error' : undefined" placeholder="例如：我们是一家电商公司，客服每天要处理大量重复咨询。希望用 AI 回答商品、物流和售后问题，复杂情况转人工，并接入现有客服系统。" /></label>
+        <div class="business-field-meta"><p v-if="businessError" id="business-error" role="alert">{{ businessError }}</p><span>{{ businessRequirement.length }} / 4000</span></div>
+        <details class="business-conditions"><summary>交付约束与验收标准 <span>选填</span></summary><label class="field">交付约束<textarea v-model="businessConstraints" maxlength="2000" :disabled="busy" placeholder="例如：6 周上线，2 人开发，客户数据不能离开内网，需对接现有系统。" /></label><label class="field">验收标准<textarea v-model="businessSuccess" maxlength="2000" :disabled="busy" placeholder="例如：以真实客服问题集验收，答案可追溯，无法确认的问题必须转人工。" /></label></details>
+      </section>
+      <section v-else class="material-section resume-section" aria-labelledby="resume-heading" :aria-busy="uploadKind === 'resume'">
         <div class="material-heading"><div><h4 id="resume-heading">个人简历</h4><span class="material-requirement">简历 / 项目经历，二选一</span></div><span :class="['material-status', { ready: resumeId || resumeText.trim() }]" role="status"><CheckCircle2 v-if="resumeId || resumeText.trim()" :size="15" />{{ resumeId ? '已上传' : resumeText.trim() ? '已填写经历' : '待完善' }}</span></div>
         <input ref="resumeInput" class="resume-file-input" type="file" accept=".pdf,.docx" hidden :disabled="uploading || busy" @change="uploadResume" />
         <div v-if="resumeId" class="material-file resume-file">
@@ -33,6 +42,7 @@
         <details v-if="resumeId" class="material-details"><summary>查看简历内容</summary><pre class="source-text">{{ resumeText }}</pre></details>
         <label v-else class="field manual-experience">或填写项目经历<textarea v-model="resumeText" maxlength="80000" :disabled="busy || uploading" placeholder="介绍你参与的项目、负责的工作和取得的成果" /></label>
       </section>
+      <details class="setup-extra materials-extra"><summary><Library :size="17" /><span>参考资料与题库</span><small>{{ selectedTracks.length || selectedIds.length ? `${selectedTracks.length} 个岗位 · ${selectedIds.length} 道临时题` : '可选' }}</small><ChevronDown :size="16" /></summary>
       <section class="material-section knowledge-section" aria-labelledby="knowledge-heading" :aria-busy="uploadKind === 'knowledge'">
         <div class="material-heading"><div><h4 id="knowledge-heading">本次临时知识库 <span class="optional-label">可选</span></h4><span class="material-requirement">仅本次使用，不加入公共题库</span></div><span :class="['material-status', { ready: knowledgeFiles.length }]" role="status">{{ knowledgeFiles.length ? `已上传 ${knowledgeFiles.length} 份` : '未添加' }}</span></div>
         <input ref="knowledgeInput" class="knowledge-file-input" type="file" accept=".md,.markdown,.pdf,.docx" hidden :disabled="uploading || busy" @change="uploadKnowledge" />
@@ -46,28 +56,45 @@
         <div v-if="knowledgeFiles.length" class="knowledge-footer"><span :class="{ 'selection-pending': !selectedIds.length }">{{ selectedIds.length ? `本次已选 ${selectedIds.length} 道临时题目` : '尚未选题，本次暂不使用这些资料' }}</span><button type="button" class="secondary upload-command" :disabled="uploading || busy" @click="knowledgeInput?.click()"><Plus :size="16" />继续添加</button></div>
         <details v-if="bank.length" class="material-details temporary-questions"><summary>选择本次使用的题目 · {{ selectedIds.length }} / {{ bank.length }}</summary><fieldset class="question-selection"><legend>临时题目（最多选择 20 道）</legend><label v-for="q in bank" :key="q.id"><input type="checkbox" :value="q.id" v-model="selectedIds" :disabled="busy || uploading || (!selectedIds.includes(q.id) && selectedIds.length >= 20)" />{{ q.question }}</label></fieldset></details>
       </section>
-      <label class="field">目标岗位<input v-model="jobTrack" maxlength="100" :disabled="busy" /></label>
+      <fieldset class="question-selection"><legend>题库适用岗位（可多选，最多 10 个）</legend><p v-if="!tracks.length" class="description">暂无已入库的岗位题库</p><label v-for="track in tracks" :key="track.job_track"><input type="checkbox" :value="track.job_track" v-model="selectedTracks" :disabled="busy || (!selectedTracks.includes(track.job_track) && selectedTracks.length >= 10)" />{{ track.job_track }} <small>· {{ track.question_count }} 道题</small></label></fieldset>
+      </details>
       <div class="field-grid"><label class="field setting-field"><span>面试风格</span><select v-model="style" :disabled="busy"><option v-for="item in interviewStyles" :key="item.value" :value="item.value">{{ item.label }}</option></select><small class="field-help">{{ styleDescription }}</small></label><label class="field setting-field"><span>面试轮数</span><select v-model.number="totalQuestions" :disabled="busy"><option :value="3">3 轮</option><option :value="5">5 轮</option><option :value="8">8 轮</option></select><small class="field-help">控制本次练习的完整程度。</small></label></div>
       <label class="field setting-field"><span>工作年限</span><select v-model="experienceYears" :disabled="busy"><option v-for="item in experienceOptions" :key="item.value" :value="item.value">{{ item.label }}</option></select><small class="field-help">用于匹配适合当前经验阶段的题目难度。</small></label>
+      <details class="setup-extra"><summary><SlidersHorizontal :size="17" /><span>提问表达与语音</span><small>{{ questionExpression }} / 5 档</small><ChevronDown :size="16" /></summary>
       <div class="field-grid"><div class="field setting-field"><span>面试官音色</span><select v-model="interviewerVoice" :disabled="busy || previewBusy"><option value="">系统默认</option><option value="female">女声</option><option value="male">男声</option></select><small class="field-help">选择面试官的声音，点击试听感受效果。</small><button type="button" class="secondary preview-button" :disabled="busy || previewBusy" @click="previewVoice">{{ previewBusy ? '正在生成试听…' : '试听当前音色' }}</button><audio v-if="previewAudio" ref="previewPlayer" :src="previewAudio" controls aria-label="面试官音色试听" /></div><label class="field setting-field"><span>面试官语气</span><select v-model="interviewerTone" :disabled="busy || previewBusy"><option value="professional">专业稳重</option><option value="friendly">亲切自然</option><option value="pressing">追问感强</option><option value="concise">简洁利落</option></select><small class="field-help">不改变题目难度；部分音频模型通过朗读节奏体现语气。</small></label></div>
       <QuestionExpression v-model="questionExpression" :disabled="busy" />
-      <fieldset class="question-selection"><legend>题库适用岗位（可多选，最多 10 个）</legend><p v-if="!tracks.length" class="description">暂无已入库的岗位题库</p><label v-for="track in tracks" :key="track.job_track"><input type="checkbox" :value="track.job_track" v-model="selectedTracks" :disabled="busy || (!selectedTracks.includes(track.job_track) && selectedTracks.length >= 10)" />{{ track.job_track }} <small>· {{ track.question_count }} 道题</small></label></fieldset>
-      <p class="description">{{ selectedTracks.length ? `已选 ${selectedTracks.length} 个岗位题库。` : '未选择时，围绕简历与目标岗位出题。' }}系统会从所选岗位均衡抽取本场参考题，再结合简历与回答追问。</p>
-      <div class="modal-actions"><button class="secondary" :disabled="uploading || busy" @click="showConfig = false">保存设置</button><button class="primary" :disabled="uploading || busy" @click="startInterview">{{ busy ? '正在准备…' : '开始面试' }}</button></div>
+      </details>
+      <p v-if="selectedTracks.length" class="selection-summary">已选 {{ selectedTracks.length }} 个岗位题库</p>
+      </div>
+      <div class="config-footer"><span>{{ businessMode ? '企业业务' : '简历经历' }} · {{ totalQuestions }} 轮</span><div class="modal-actions"><button class="secondary" :disabled="uploading || busy" @click="showConfig = false">保存设置</button><button class="primary" :disabled="uploading || busy" @click="startInterview"><LoaderCircle v-if="busy" class="upload-spinner" :size="16" /><ArrowRight v-else :size="16" />{{ busy ? '正在准备…' : '开始面试' }}</button></div></div>
     </div></div>
   </div>
 </template>
 <script setup>
-import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
+import { ref, computed, nextTick, onMounted, onBeforeUnmount, watch } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 import { API, request } from '../api'
 import { interviewStyles, styleName } from '../interviewStyles'
 import { historyItems, historyLoading, historyError, refreshHistory } from '../studentHistory'
 import QuestionExpression from '../components/QuestionExpression.vue'
-import { CheckCircle2, FileText, Library, LoaderCircle, Plus, RefreshCw, Trash2, Upload } from 'lucide-vue-next'
+import { ArrowRight, BriefcaseBusiness, CheckCircle2, ChevronDown, FileText, Library, LoaderCircle, Plus, RefreshCw, SlidersHorizontal, Trash2, Upload, X } from 'lucide-vue-next'
 const router = useRouter(), route = useRoute()
 const jobTrack = ref('AI 应用开发工程师'), style = ref('HARDCORE'), totalQuestions = ref(5), experienceYears = ref('1-3'), interviewerVoice = ref(''), interviewerTone = ref('professional')
 const questionExpression = ref(3)
+const interviewMode = ref('RESUME'), businessMode = computed(() => interviewMode.value === 'BUSINESS_SCENARIO')
+const businessRequirement = ref(''), businessConstraints = ref(''), businessSuccess = ref(''), businessError = ref('')
+const businessInput = ref(null), configDialog = ref(null), configTrigger = ref(null)
+function setMode(mode) { interviewMode.value = mode; uploadError.value = ''; businessError.value = ''; stopPreview() }
+function closeConfig() { if (!uploading.value && !busy.value) showConfig.value = false }
+function configKeydown(event) {
+  if (event.key === 'Escape') { event.preventDefault(); closeConfig(); return }
+  if (event.key !== 'Tab') return
+  const focusable = [...configDialog.value.querySelectorAll('button:not(:disabled),input:not(:disabled),select:not(:disabled),textarea:not(:disabled),summary')].filter(el => el.getClientRects().length)
+  const first = focusable[0], last = focusable.at(-1)
+  if (event.shiftKey && (document.activeElement === first || document.activeElement === configDialog.value)) { event.preventDefault(); last?.focus() }
+  else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus() }
+}
+watch(businessRequirement, () => { businessError.value = '' })
 const experienceOptions=[{value:'1',label:'1 年'},{value:'1-3',label:'1～3 年'},{value:'3-5',label:'3～5 年'},{value:'5-7',label:'5～7 年'},{value:'7+',label:'7 年以上'}]
 const styleDescriptions={HARDCORE:'围绕工程细节连续追问，适合检验技术深度。',GUIDING:'循序渐进地提示思路，帮助你建立完整回答。',BUSINESS:'聚焦业务目标、用户价值和落地结果。',CREATIVE:'AI 非常规问题与跨领域联想，考查创造力和边界意识。',ALL_ROUND:'业务场景与技术深挖结合，难度偏高。'}
 const styleDescription=computed(()=>styleDescriptions[style.value])
@@ -91,13 +118,14 @@ function stopPreview() {
   previewAudio.value = ''
 }
 watch(showConfig, value => { if (!value) stopPreview() }, {flush:'sync'})
+watch(showConfig, async value => { await nextTick(); if (value) configDialog.value?.focus(); else if (!disposed) configTrigger.value?.focus() })
 watch([interviewerVoice, interviewerTone], stopPreview, {flush:'sync'})
 async function previewVoice() {
   if (previewBusy.value) return
   stopPreview(); previewController = new AbortController(); const current = previewVersion
   previewBusy.value = true; uploadError.value = ''
   try {
-    const body = new FormData(); body.append('text', '你好，我是本场面试官。我们先从你的项目经历开始，请用几句话介绍你负责的部分。'); body.append('voice', interviewerVoice.value); body.append('tone', interviewerTone.value)
+    const body = new FormData(); body.append('text', businessMode.value ? '你好，我们从公司的业务需求开始。面对这个场景，你会优先确认哪个关键问题？' : '你好，我是本场面试官。我们先从你的项目经历开始，请用几句话介绍你负责的部分。'); body.append('voice', interviewerVoice.value); body.append('tone', interviewerTone.value)
     const token = localStorage.getItem('mianmian-token')
     const response = await fetch(API + '/api/v1/audio/tts', {method:'POST', body, signal:previewController.signal, headers:token ? {Authorization:`Bearer ${token}`} : {}})
     if (!response.ok) { const data = await response.json().catch(() => ({})); throw new Error(data.detail || '试听生成失败') }
@@ -140,13 +168,15 @@ function removeKnowledge(file) {
 }
 async function startInterview() {
   if(busy.value || uploading.value)return
-  if(!resumeId.value && !resumeText.value.trim()) { showConfig.value = true; uploadError.value = '请上传简历，或填写项目经历后开始'; return }
+  if (!jobTrack.value.trim()) { showConfig.value = true; uploadError.value = '请填写目标岗位'; return }
+  if (businessMode.value && businessRequirement.value.trim().length < 10) { showConfig.value = true; businessError.value = '请至少用 10 个字说明公司的业务需求'; await nextTick(); businessInput.value?.focus(); return }
+  if(!businessMode.value && !resumeId.value && !resumeText.value.trim()) { showConfig.value = true; uploadError.value = '请上传简历、填写项目经历，或切换到企业业务面试'; return }
   stopPreview(); busy.value = true; error.value = ''; uploadError.value = ''
   try {
-    const data = await request('/api/v1/interviews',{method:'POST',headers:{'Content-Type':'application/json'},signal:controller.signal,body:JSON.stringify({job_track:jobTrack.value,interviewer_style:style.value,experience_years:experienceYears.value,interviewer_voice:interviewerVoice.value,interviewer_tone:interviewerTone.value,question_expression:questionExpression.value,resume_id:resumeId.value || null,resume_text:resumeId.value ? '' : resumeText.value,target_question_count:totalQuestions.value,knowledge_tracks:selectedTracks.value,temporary_questions:bank.value.filter(q => selectedIds.value.includes(q.id))})})
+    const data = await request('/api/v1/interviews',{method:'POST',headers:{'Content-Type':'application/json'},signal:controller.signal,body:JSON.stringify({job_track:jobTrack.value,interviewer_style:style.value,experience_years:experienceYears.value,interviewer_voice:interviewerVoice.value,interviewer_tone:interviewerTone.value,question_expression:questionExpression.value,interview_mode:interviewMode.value,business_scenario:businessMode.value ? {requirement:businessRequirement.value.trim(),constraints:businessConstraints.value.trim(),success_criteria:businessSuccess.value.trim()} : null,resume_id:businessMode.value ? null : resumeId.value || null,resume_text:businessMode.value || resumeId.value ? '' : resumeText.value,target_question_count:totalQuestions.value,knowledge_tracks:selectedTracks.value,temporary_questions:bank.value.filter(q => selectedIds.value.includes(q.id))})})
     if(disposed)return
     router.push(`/interview/${data.session_id}`)
-  } catch(e) { if(!disposed) { error.value = e.message; uploadError.value = e.message } } finally { busy.value = false }
+  } catch(e) { if(!disposed) { error.value = e.message; uploadError.value = e.message; await nextTick(); configDialog.value?.querySelector('.config-body')?.scrollTo({top:0,behavior:'smooth'}) } } finally { busy.value = false }
 }
 onMounted(async () => {
   try { tracks.value = (await request('/api/v1/student/question-tracks',{signal:controller.signal})).items } catch(e) { if(!disposed)error.value = e.message }
@@ -154,6 +184,10 @@ onMounted(async () => {
 onBeforeUnmount(() => { disposed = true; controller.abort(); stopPreview() })
 </script>
 <style scoped>
+.config-body .materials-extra{border-top:0;margin-top:0}
+.modal.config-modal{display:flex;flex-direction:column;max-height:min(920px,calc(100dvh - 40px));padding:0;border-radius:8px;overflow:hidden;background:#fff;outline:none}
+.config-modal .config-title{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:22px 28px 18px;margin:0;border-bottom:1px solid #e3e9e5;flex-shrink:0}.config-modal .config-title h3{font-size:22px;letter-spacing:0;margin:6px 0 0}.config-title .section-kicker{letter-spacing:0}.config-close{width:36px;height:36px;justify-content:center}.config-body{padding:20px 28px 24px;overflow-y:auto;overscroll-behavior:contain;min-height:0}.config-body .target-role{margin:0 0 22px;color:#385547;font-weight:600}.target-role input{font-weight:400}.interview-mode{border:0;padding:0;margin:0 0 24px;min-width:0}.interview-mode legend{font-size:14px;font-weight:600;color:#385547;margin-bottom:12px}.mode-options{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px;padding:4px;background:#eff3f1;border-radius:8px}.mode-options button{display:flex;align-items:center;gap:10px;min-height:68px;padding:12px;border:1px solid transparent;border-radius:6px;background:transparent;color:#788980;text-align:left}.mode-options button[aria-pressed=true]{background:#fff;color:#28694e;border-color:#d5e4db;box-shadow:0 1px 3px #274d3510}.mode-options button>svg{flex-shrink:0}.mode-options button>svg:last-child:not(:first-child){margin-left:auto}.mode-options button>span{min-width:0}.mode-options strong{display:block;font-size:14px;font-weight:600}.mode-options small{display:block;font-size:11px;margin-top:5px;line-height:1.5;color:#7d8d82}.business-section .material-heading{align-items:center;margin-bottom:12px}.business-section .material-heading h4{margin:0}.scenario-tag{color:#508373;font-size:12px;white-space:nowrap}.business-section .business-requirement{margin-bottom:6px}.business-requirement textarea{min-height:150px;font-size:14px;background:#fcfdfc}.business-requirement textarea[aria-invalid=true]{border-color:#bc5c46}.business-field-meta{display:flex;align-items:start;gap:8px;font-size:12px;min-height:20px;line-height:1.6}.business-field-meta>span{margin-left:auto;color:#95a097;white-space:nowrap;font-variant-numeric:tabular-nums}.business-field-meta p{color:#a6503d}.business-conditions{margin:14px 0 0}.business-conditions summary{font-size:13px;color:#64796c;min-height:32px;padding:6px 0}.business-conditions summary span{font-size:11px;color:#909e94;margin-left:8px}.business-conditions textarea{min-height:90px;font-size:14px}.setup-extra{border-top:1px solid #e3e9e5;border-bottom:1px solid #e3e9e5;padding:12px 0;margin:16px 0 22px}.setup-extra>summary{display:flex;align-items:center;gap:8px;list-style:none;min-height:32px;font-size:14px;color:#42654f}.setup-extra>summary::-webkit-details-marker{display:none}.setup-extra>summary small{font-size:11px;color:#8b978e;margin-left:auto}.setup-extra>summary svg{flex-shrink:0}.setup-extra[open]>summary>svg:last-child{transform:rotate(180deg)}.setup-extra[open]>summary{margin-bottom:20px}.setup-extra .knowledge-section{border-bottom:0;margin-bottom:0}.setup-extra .question-selection{margin-bottom:12px}.selection-summary{font-size:12px;color:#6a8574}.config-footer{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:16px 28px;border-top:1px solid #e3e9e5;background:#fafcfb;flex-shrink:0}.config-footer>span{font-size:12px;color:#75877a;white-space:nowrap}.config-footer .modal-actions{margin:0;gap:10px}.config-footer button{gap:7px}.config-footer .primary{background:#2e7057}.config-footer .primary:hover:not(:disabled){background:#245a45}
+@media(max-width:650px){.config-modal .config-title{padding:18px 18px 14px}.config-modal .config-title h3{font-size:20px}.config-body{padding:18px}.mode-options button{padding:10px 8px;gap:7px}.mode-options button>svg:last-child:not(:first-child){display:none}.mode-options small{font-size:10px}.config-footer{padding:12px 18px;flex-wrap:wrap;gap:8px}.config-footer>span{width:100%}.config-footer .modal-actions{width:100%;display:grid;grid-template-columns:1fr 1fr}.business-requirement textarea,.business-conditions textarea{font-size:16px}.mode-options button>svg:first-child{width:17px}}
 .history-panel { margin-top: clamp(24px, 2vw, 36px); }
 .history-actions { display: flex; flex-wrap: wrap; gap: 10px; }
 .history-entry { display: grid; grid-template-columns: 80px minmax(0, 1fr) auto; align-items: center; gap: clamp(16px, 2vw, 32px); padding: clamp(22px, 2vw, 32px) 0; border-top: 1px solid #eceee9; }

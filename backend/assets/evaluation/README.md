@@ -1,4 +1,16 @@
-# 面试评价表第一页
+# 面试评价表资产
+
+当前评价表由 `backend/app/evaluation_sheet.py` 根据教师配置绘制为单页 A4，
+不再依赖背景 PDF 的固定八行文字。教师入口为 `/teacher/evaluation`。
+配置模型、字数和条目数量上限位于 `evaluation_templates.py`；改动上限须同步检查最坏情况下的 PDF 排版。
+4-8 项、权重合计 100%；每条观察要点最多 52 字，评分证据最多 55 字，摘要各最多 42 字。
+学生姓名、岗位与班级按其现有最大长度完整换行，字号有下限，容纳失败时明确报错而不截字。
+
+填入内容使用随项目部署的 Noto Sans SC Regular，许可见 `OFL.txt`。
+最终 PDF、评价结构及模板快照缓存在数据库中，不依赖 worker 的本地文件。
+模板内容变化会使旧缓存失效；重新生成时逐项匹配新条目并按新权重计算。
+
+以下旧模板资产保留作为原始参考；不会被教师配置改写：
 
 原稿：项目根目录 `AI应用开发工程师面试评价表.docx`。
 SHA-256：`daabc30166824ad2de199f19fd7efdf86affab1e79fc831936a1c0e6c58b68e1`。
@@ -13,13 +25,6 @@ SHA-256：`daabc30166824ad2de199f19fd7efdf86affab1e79fc831936a1c0e6c58b68e1`。
 全部验证后按原表权重计算；关键项不足 3 分时不推荐。
 结论仅用于模拟训练；没有人工签名，匹配职级需教师复核。
 
-运行时只需 `reportlab` 和已有的 `pypdf`，无需 LibreOffice。
-部署时 `COPY backend` 会包含模板与字体。最终 PDF 和结构化评估缓存在
-数据库 `evaluation_sheet` 记录中，不依赖某个 worker 的本地文件。
-
-替换模板时，先用正确的中文字体将 DOCX 渲染成 PDF，再使用
-`backend/scripts/prepare_evaluation_template.py`，传入 `--pdf`、
-`--font`（Noto Sans SC TTF）、`--license` 和 `--output`。
-这个离线准备脚本需要 PyMuPDF 和 fonttools；线上服务不需要这两项。
-若布局改变，须同步校准准备脚本的清除区域及 `evaluation_sheet.py` 的填入坐标，
-更新 VERSION，并验证导出只有一页且全部字段可读。单纯覆盖 DOCX 不会自动修改模板。
+原 `first-page.pdf` 使用 Noto Serif SC，许可见 `Serif-OFL.txt`。
+离线脚本 `backend/scripts/prepare_evaluation_template.py` 仍可复现旧模板背景，
+但覆盖背景 PDF 或原始 DOCX 不会改变当前教师配置及下载版式。

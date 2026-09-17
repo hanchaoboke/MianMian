@@ -6,10 +6,13 @@
       <template v-if="!isLogin">
         <nav v-if="isTeacher" aria-label="教师功能导航">
           <router-link to="/teacher" exact-active-class="active">▦ <span>题库管理</span></router-link>
+          <router-link to="/teacher/reports" :class="{active: route.path.startsWith('/teacher/reports')}" active-class="active"><FileText :size="18" /><span>学生面试报告</span></router-link>
           <router-link to="/teacher/classes" exact-active-class="active">▤ <span>班级管理</span></router-link>
+          <router-link to="/teacher/evaluation" exact-active-class="active"><ClipboardList :size="18" /><span>评价表配置</span></router-link>
           <router-link to="/teacher/accounts" exact-active-class="active">♙ <span>分配账号</span></router-link>
           <router-link to="/teacher/usage" exact-active-class="active">▥ <span>学生 Token 消耗</span></router-link>
           <router-link to="/teacher/staff-usage" exact-active-class="active">▥ <span>教师 Token 消耗</span></router-link>
+          <router-link v-if="isAdmin" to="/teacher/storage" exact-active-class="active"><HardDrive :size="18" /><span>数据存储</span></router-link>
         </nav>
         <nav v-else aria-label="学生功能导航"><router-link to="/" exact-active-class="active">⌁ <span>学员 · 面试工作台</span></router-link></nav>
         <button v-if="!isTeacher" class="calendar-toggle" :aria-expanded="calendarOpen" aria-controls="sidebar-calendar" @click="calendarOpen = !calendarOpen">面试日历 <span>{{ calendarOpen ? '收起 ↑' : '展开查看 ↓' }}</span></button>
@@ -26,7 +29,7 @@ import { computed, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import InterviewCalendar from './components/InterviewCalendar.vue'
 import LogoutButton from './components/LogoutButton.vue'
-import { Bookmark } from 'lucide-vue-next'
+import { Bookmark, ClipboardList, FileText, HardDrive } from 'lucide-vue-next'
 import { refreshHistory, clearHistory } from './studentHistory'
 const route = useRoute()
 const calendarOpen = ref(false)
@@ -35,11 +38,17 @@ const isHome = computed(() => route.path === '/')
 const isInterview = computed(() => route.path.startsWith('/interview/') || route.path.startsWith('/practice/'))
 const isLogin = computed(() => ['/login', '/teacher/login'].includes(route.path))
 const isTeacher = computed(() => route.path.startsWith('/teacher'))
+const isAdmin = computed(() => {
+  // Re-read the account when navigation follows login/logout in the same tab.
+  void route.path
+  try { return JSON.parse(localStorage.getItem('mianmian-user') || 'null')?.role === 'ADMIN' } catch { return false }
+})
 watch(() => route.path, () => {
   if (isLogin.value || isTeacher.value || isInterview.value) clearHistory()
   else refreshHistory()
 }, {immediate:true})
 const pageTitle = computed(() => {
+  if (route.path.startsWith('/teacher/reports/')) return '学生面试报告'
   if (isHome.value) {
     let user
     try { user = JSON.parse(localStorage.getItem('mianmian-user') || 'null') } catch {}
@@ -48,10 +57,13 @@ const pageTitle = computed(() => {
   }
   return ({
   '/teacher': '题库管理',
+  '/teacher/reports': '学生面试报告',
   '/teacher/accounts': '分配账号',
   '/teacher/classes': '班级管理',
+  '/teacher/evaluation': '评价表配置',
   '/teacher/usage': '学生 Token 消耗',
   '/teacher/staff-usage': '教师 Token 消耗',
+  '/teacher/storage': '数据存储',
   '/teacher/login': '教师登录',
   '/login': '学生训练入口',
   '/bookmarks': '标记题目回顾',

@@ -4,6 +4,7 @@ import { mount, flushPromises } from '@vue/test-utils'
 import { createRouter, createMemoryHistory } from 'vue-router'
 import Report from '../src/views/Report.vue'
 import LogoutButton from '../src/components/LogoutButton.vue'
+import App from '../src/App.vue'
 import { historyItems, clearHistory } from '../src/studentHistory'
 const { request } = vi.hoisted(() => ({request:vi.fn()}))
 vi.mock('../src/api', () => ({request}))
@@ -50,4 +51,35 @@ it('keeps question review usable on summary failure and retries successfully',as
   expect(wrapper.text()).toContain('逐题复盘仍可查看');expect(wrapper.text()).toContain('真实问题集')
   await wrapper.find('.interview-summary button').trigger('click');await flushPromises()
   expect(wrapper.text()).toContain(summary.conclusion);expect(wrapper.find('.interview-summary .error').exists()).toBe(false)
+})
+
+it('shows the business brief and evaluates proposal structure instead of past project storytelling',async () => {
+  request.mockResolvedValue({...report,interview_summary:summary,interview_mode:'BUSINESS_SCENARIO',business_scenario:{requirement:'公司需要 AI 客服接入现有工单系统。',constraints:'六周上线',success_criteria:'答案可追溯'}})
+  wrapper=mount(Report,{global:{plugins:[router]}});await flushPromises()
+  expect(wrapper.find('.business-brief').text()).toContain('六周上线')
+  expect(wrapper.find('.dimensions').text()).toContain('方案表达')
+  expect(wrapper.find('.dimensions').text()).not.toContain('STAR 表达')
+})
+
+it('shows exactly one diagnosis heading in the complete student page',async () => {
+  request.mockImplementation(async path=>path.includes('/student/interviews') ? {items:[],dates:{}} : {...report,interview_summary:summary})
+  router.addRoute({path:'/report/:id',component:Report})
+  await router.replace('/report/heading-check')
+  wrapper=mount(App,{global:{plugins:[router]}});await flushPromises()
+  expect(wrapper.findAll('h1,h2').filter(h=>h.text()==='面试诊断')).toHaveLength(1)
+  expect(wrapper.find('h1').text()).toBe('面试诊断')
+})
+
+it('expands a long answer without hiding its feedback or changing its contents',async () => {
+  const answer='这是学生的完整回答。'.repeat(55)
+  request.mockResolvedValue({...report,interview_summary:summary,turns:[{...report.turns[0],answer,feedback:'工程深度：需要补充验证过程。改进建议：1）准备数据；2）对比结果。'}]})
+  wrapper=mount(Report,{global:{plugins:[router]}});await flushPromises()
+  expect(wrapper.find('.answer-pane .transcript').text()).toBe(answer.slice(0,360)+'…')
+  expect(wrapper.find('.feedback-pane').text()).toContain('需要补充验证过程')
+  expect(wrapper.findAll('.feedback-pane li')).toHaveLength(2)
+  await wrapper.find('.answer-toggle').trigger('click')
+  expect(wrapper.find('.answer-pane .transcript').text()).toBe(answer)
+  expect(wrapper.find('.answer-toggle').attributes('aria-expanded')).toBe('true')
+  await wrapper.find('.answer-toggle').trigger('click')
+  expect(wrapper.find('.answer-toggle').attributes('aria-expanded')).toBe('false')
 })

@@ -35,6 +35,31 @@ beforeEach(() => {
 afterEach(() => {wrapper?.unmount();vi.useRealTimers();vi.restoreAllMocks();vi.unstubAllGlobals()})
 
 describe('Interview room', () => {
+  it('separates identity from audio and reuses speech for pause, resume and replay', async () => {
+    const play = vi.spyOn(HTMLMediaElement.prototype,'play').mockImplementation(function(){this.dispatchEvent(new Event('play'));return Promise.resolve()})
+    vi.spyOn(HTMLMediaElement.prototype,'pause').mockImplementation(function(){this.dispatchEvent(new Event('pause'))})
+    const fetch = vi.fn().mockResolvedValue({ok:true,blob:async()=>new Blob(['speech'])})
+    vi.stubGlobal('fetch',fetch)
+    await open()
+    expect(wrapper.find('.interviewer-identity').text()).toBe('M')
+    expect(wrapper.find('.interviewer-label button').exists()).toBe(false)
+    await button('朗读问题').trigger('click');await flushPromises()
+    expect(button('暂停朗读')).toBeDefined()
+    await button('暂停朗读').trigger('click')
+    await button('继续朗读').trigger('click');await flushPromises()
+    await wrapper.find('.question-audio audio').trigger('ended')
+    await button('重新朗读').trigger('click');await flushPromises()
+    expect(fetch).toHaveBeenCalledTimes(1);expect(play).toHaveBeenCalledTimes(3)
+    socket.onmessage({data:JSON.stringify({type:'SESSION_STATE',payload:{...session(),turn:1,question:'新题目'}})})
+    await flushPromises()
+    expect(button('朗读问题')).toBeDefined();expect(wrapper.find('.question-audio audio').exists()).toBe(false)
+  })
+  it('allows retry after speech synthesis fails', async () => {
+    vi.stubGlobal('fetch',vi.fn().mockResolvedValue({ok:false,json:async()=>({detail:'语音服务繁忙'})}))
+    await open();await button('朗读问题').trigger('click');await flushPromises()
+    expect(wrapper.text()).toContain('语音服务繁忙')
+    expect(button('朗读问题').attributes('disabled')).toBeUndefined()
+  })
   it('records, transcribes and sends only after student confirmation', async () => {
     await open()
     await button('语音输入').trigger('click'); await flushPromises()

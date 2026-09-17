@@ -48,6 +48,20 @@ class Store:
             row = db.execute('SELECT data FROM records WHERE kind=%s AND id=%s' if self.postgres else 'SELECT data FROM records WHERE kind=? AND id=?', (kind,id)).fetchone()
         return row[0] if self.postgres and row else (json.loads(row[0]) if row else None)
 
+    def overview(self):
+        with self.connect() as db:
+            counts = dict(db.execute('SELECT kind,count(*) FROM records GROUP BY kind').fetchall())
+            if self.postgres:
+                has_usage = db.execute("SELECT to_regclass('token_usage')").fetchone()[0] is not None
+                has_migration = db.execute("SELECT to_regclass('storage_migrations')").fetchone()[0] is not None
+            else:
+                has_usage = db.execute("SELECT name FROM sqlite_master WHERE name='token_usage'").fetchone() is not None
+                has_migration = False
+            usage = db.execute('SELECT count(*),coalesce(sum(total_tokens),0) FROM token_usage').fetchone() if has_usage else (0, 0)
+            migration = db.execute('SELECT details FROM storage_migrations ORDER BY completed_at DESC LIMIT 1').fetchone() if has_migration else None
+        return {'record_counts': counts, 'record_total': sum(counts.values()), 'usage_rows': usage[0],
+                'total_tokens': int(usage[1]), 'migration': migration[0] if migration else None}
+
     def list(self, kind):
         with self.connect() as db:
             rows = db.execute('SELECT data FROM records WHERE kind=%s ORDER BY id DESC' if self.postgres else 'SELECT data FROM records WHERE kind=? ORDER BY rowid DESC', (kind,)).fetchall()
@@ -99,6 +113,21 @@ class Store:
         return {'items': [r[0] if self.postgres else json.loads(r[0]) for r in rows],
                 'total': total, 'page': page, 'page_size': page_size}
 
+    def delete_trashed_question(self, id):
+        with self.connect() as db:
+            if not self.postgres:
+                db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT data FROM records WHERE kind=%s AND id=%s FOR UPDATE' if self.postgres else
+                             'SELECT data FROM records WHERE kind=? AND id=?', ('question', id)).fetchone()
+            if row is None:
+                return False
+            record = row[0] if self.postgres else json.loads(row[0])
+            if not record.get('deleted_at'):
+                raise ValueError('请先将题目移入回收箱')
+            db.execute('DELETE FROM records WHERE kind=%s AND id=%s' if self.postgres else
+                       'DELETE FROM records WHERE kind=? AND id=?', ('question', id))
+            return True
+
     def list_page(self, kind, page, page_size=10):
         with self.connect() as db:
             placeholder = '%s' if self.postgres else '?'
@@ -122,6 +151,8 @@ class Store:
             if row is None:
                 return None
             question = row[0] if self.postgres else json.loads(row[0])
+            if question.get('deleted_at'):
+                return None
             question.update(answer=answer, updated_at=updated_at, updated_by=updated_by)
             if job_track is not None:
                 question['job_track'] = job_track

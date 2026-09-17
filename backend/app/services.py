@@ -14,6 +14,7 @@ from docx.text.paragraph import Paragraph
 from pydantic import BaseModel, Field, ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pypdf import PdfReader
+from .storage_locations import StorageLocations
 
 
 class Settings(BaseSettings):
@@ -33,6 +34,7 @@ class Settings(BaseSettings):
     admin_username: str = 'admin'
     admin_password: str = 'change-me-now'
     data_dir: Path = Path(__file__).resolve().parents[1] / 'uploads'
+    storage_config_file: Path | None = None
 
     @property
     def postgres_dsn(self):
@@ -40,6 +42,8 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+storage_locations = StorageLocations(settings.data_dir, settings.storage_config_file)
+storage_locations.startup(settings)
 MAX_UPLOAD = 10 * 1024 * 1024
 MAX_AUDIO_UPLOAD = 25 * 1024 * 1024
 MAX_ANSWER_CHARACTERS = 6000
